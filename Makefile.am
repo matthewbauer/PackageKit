@@ -2,6 +2,9 @@ AUTOMAKE_OPTIONS = 1.7
 
 ACLOCAL_AMFLAGS = -I m4 ${ACLOCAL_FLAGS}
 
+AM_CFLAGS = -g3 -O0
+AM_CXXFLAGS = -g3 -O0
+
 SUBDIRS = 						\
 	po						\
 	policy						\
