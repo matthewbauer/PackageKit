@@ -224,7 +224,7 @@ pk_backend_get_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
 
 			int narSize = 0;
 			if (drv.queryOutPath () != "")
-				narSize = state->store->queryPathInfo (drv.queryDrvPath ()).narSize;
+				narSize = state->store->queryPathInfo (drv.queryDrvPath ())->narSize;
 
 			string longDescription = drv.queryMetaString ("longDescription");
 			if (longDescription == "")
