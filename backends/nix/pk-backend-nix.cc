@@ -19,12 +19,22 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+/*
+ * Issues:
+ * - searching is case sensitive
+ * - searching doesn't use name
+ * - installing doesn't work
+ */
+
 #include <string.h>
 #include <stdlib.h>
 #include <gio/gio.h>
+#include <algorithm>
 
 #include "nix-helpers.hh"
 #include "nix-lib-plus.hh"
+
+using namespace std;
 
 typedef struct {
 	Path roothome;
@@ -55,7 +65,7 @@ pk_backend_initialize (GKeyFile* conf, PkBackend* backend)
 
 		state = nix_get_state();
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 }
@@ -242,7 +252,7 @@ pk_backend_get_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
 			);
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -308,7 +318,7 @@ pk_backend_get_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
 			);
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -349,7 +359,7 @@ pk_backend_resolve_thread (PkBackendJob* job, GVariant* params, gpointer p)
 			for (auto drv : drvs)
 			{
 				DrvName drvName (drv.name);
-				if (searchName.matches (drvName))
+				if (searchName.matches (drvName) || drv.attrPath.find (*search) != -1)
 				{
 					if (!nix_filter_drv (*state, drv, settings, filters))
 						continue;
@@ -379,7 +389,7 @@ pk_backend_resolve_thread (PkBackendJob* job, GVariant* params, gpointer p)
 			}
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -416,7 +426,7 @@ pk_backend_search_names_thread (PkBackendJob* job, GVariant* params, gpointer p)
 				break;
 
 			for (auto drv : drvs)
-				if (drv.name.find(*search) != -1)
+				if (drv.name.find(*search) != -1 || drv.attrPath.find(*search) != -1)
 				{
 					if (!nix_filter_drv (*state, drv, settings, filters))
 						continue;
@@ -445,7 +455,7 @@ pk_backend_search_names_thread (PkBackendJob* job, GVariant* params, gpointer p)
 				}
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -481,8 +491,19 @@ pk_backend_search_details_thread (PkBackendJob* job, GVariant* params, gpointer 
 			if (pk_backend_job_is_cancelled (job))
 				break;
 
-			for (auto drv : drvs)
-				if (drv.queryMetaString ("description").find (*value) != -1)
+			// make everything lowercase so it's case insensitive
+			string _value = *value;
+			transform(_value.begin(), _value.end(), _value.begin(), ::tolower);
+
+			for (auto drv : drvs) {
+				string description = drv.queryMetaString ("description");
+				transform(description.begin(), description.end(), description.begin(), ::tolower);
+				string longDescription = drv.queryMetaString ("longDescription");
+				transform(longDescription.begin(), longDescription.end(), longDescription.begin(), ::tolower);
+				string name = drv.name;
+				transform(name.begin(), name.end(), name.begin(), ::tolower);
+
+				if (description.find (_value) != -1 || longDescription.find (_value) != -1 || name.find (_value) != -1)
 				{
 					if (!nix_filter_drv (*state, drv, settings, filters))
 						continue;
@@ -509,9 +530,10 @@ pk_backend_search_details_thread (PkBackendJob* job, GVariant* params, gpointer 
 						drv.queryMetaString ("description").c_str ()
 					);
 				}
+			}
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -534,7 +556,7 @@ pk_backend_refresh_cache_thread (PkBackendJob* job, GVariant* params, gpointer p
 		state = nix_get_state ();
 		drvs = nix_get_all_derivations (*state, priv->roothome);
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -607,7 +629,7 @@ pk_backend_install_packages_thread (PkBackendJob* job, GVariant* params, gpointe
 			);
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -689,7 +711,7 @@ pk_backend_remove_packages_thread (PkBackendJob* job, GVariant* params, gpointer
 			);
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -828,7 +850,7 @@ pk_backend_update_packages_thread (PkBackendJob* job, GVariant* params, gpointer
 			}
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
@@ -878,7 +900,7 @@ pk_backend_download_packages_thread (PkBackendJob* job, GVariant* params, gpoint
 			state->store->buildPaths (paths);
 		}
 	}
-	catch (std::exception & e)
+	catch (exception & e)
 	{
 	}
 
