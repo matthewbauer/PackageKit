@@ -1,0 +1,97 @@
+{
+  "nodes": {
+    "make-package": {
+      "inputs": {
+        "nixpkgs": "nixpkgs"
+      },
+      "locked": {
+        "lastModified": 1595605098,
+        "narHash": "sha256-LSTl/g3aKpsh9QU7V2JVaB55brINOVwvB3ln7yK+XMg=",
+        "owner": "matthewbauer",
+        "repo": "make-package.nix",
+        "rev": "9a6f2711bc5f0e0719477a24067a9e8c46733ebf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "matthewbauer",
+        "repo": "make-package.nix",
+        "type": "github"
+      }
+    },
+    "make-package_2": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_2"
+      },
+      "locked": {
+        "lastModified": 1595567453,
+        "narHash": "sha256-qAm6TnYYnvAndrqTlgoV1lch962YcmGzdl3WNLPFtcY=",
+        "owner": "matthewbauer",
+        "repo": "make-package.nix",
+        "rev": "ada94954b67a6ae9ae1148a2dcd364e75b1e5164",
+        "type": "github"
+      },
+      "original": {
+        "owner": "matthewbauer",
+        "repo": "make-package.nix",
+        "type": "github"
+      }
+    },
+    "nix": {
+      "inputs": {
+        "make-package": "make-package_2"
+      },
+      "locked": {
+        "lastModified": 1595604575,
+        "narHash": "sha256-pBKLiQ7EqtauSifK4nzIvw47MyX5awkjRianiLf6Ppw=",
+        "owner": "matthewbauer",
+        "repo": "nix",
+        "rev": "a386db1b5147be870b504d3a0a3a4ab01e010191",
+        "type": "github"
+      },
+      "original": {
+        "owner": "matthewbauer",
+        "ref": "make-package-flake",
+        "repo": "nix",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1595323341,
+        "narHash": "sha256-0i1ud8Jcm30nUUHZ1I7NyTxbXRg/r4YtQWGWTpyar0Y=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "55079328c219fb53f3120a34fdba3a80d3be601b",
+        "type": "github"
+      },
+      "original": {
+        "id": "nixpkgs",
+        "ref": "nixpkgs-unstable",
+        "type": "indirect"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1595323341,
+        "narHash": "sha256-0i1ud8Jcm30nUUHZ1I7NyTxbXRg/r4YtQWGWTpyar0Y=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "55079328c219fb53f3120a34fdba3a80d3be601b",
+        "type": "github"
+      },
+      "original": {
+        "id": "nixpkgs",
+        "ref": "nixpkgs-unstable",
+        "type": "indirect"
+      }
+    },
+    "root": {
+      "inputs": {
+        "make-package": "make-package",
+        "nix": "nix"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
