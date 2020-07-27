@@ -40,6 +40,7 @@
         "gst_all_1.gstreamer"
         "gst_all_1.gst-plugins-base"
         "gtk3"
+        "nlohmann_json"
       ];
       depsHostTargetPropagated = [
         "sqlite"
@@ -51,6 +52,7 @@
 
       mesonFlags = [
         "-Dpackaging_backend=nix"
+        "-Dlocal_checkout=true"
         "-Ddbus_sys=${placeholder "out"}/share/dbus-1/system.d"
         "-Ddbus_services=${placeholder "out"}/share/dbus-1/system-services"
         "-Dsystemdsystemunitdir=${placeholder "out"}/lib/systemd/system"
