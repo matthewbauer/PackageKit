@@ -53,6 +53,8 @@
       mesonFlags = [
         "-Dpackaging_backend=nix"
         "-Dlocal_checkout=true"
+        "-Dman_pages=false"
+        "-Dbash_completion=false"
         "-Ddbus_sys=${placeholder "out"}/share/dbus-1/system.d"
         "-Ddbus_services=${placeholder "out"}/share/dbus-1/system-services"
         "-Dsystemdsystemunitdir=${placeholder "out"}/lib/systemd/system"
