@@ -19,52 +19,48 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
-#include <string.h>
-#include <stdlib.h>
-#include <gio/gio.h>
+#include <pk-backend.h>
+#include <pk-backend-job.h>
 
-#include "nix-helpers.hh"
+#include <nix/config.h>
+
+#include <nix/globals.hh>
+#include <nix/eval.hh>
+#include <nix/store-api.hh>
+#include <nix/names.hh>
+#include <nix/eval-cache.hh>
+#include <nix/attr-path.hh>
+#include <nix/profiles.hh>
+#include <nix/flake/flake.hh>
+
+#include <pwd.h>
+
 #include "nix-lib-plus.hh"
 
 typedef struct {
-	Path roothome;
+	nix::ref<nix::EvalState> state;
 } PkBackendNixPrivate;
-
 static PkBackendNixPrivate* priv;
-static EvalState* state;
-static DrvInfos drvs;
 
 void
 pk_backend_initialize (GKeyFile* conf, PkBackend* backend)
 {
-	g_debug ("backend initalize start");
-
 	priv = g_new0 (PkBackendNixPrivate, 1);
 
-	struct passwd* uid_ent = NULL;
-	if ((uid_ent = getpwuid (getuid ())) == NULL)
-		g_error ("Failed to get HOME");
-	priv->roothome = uid_ent->pw_dir;
+	nix::loadConfFile ();
+	nix::initGC ();
 
-	verbosity = (Verbosity) -1;
+	nix::verbosity = nix::lvlWarn;
+	nix::settings.verboseBuild = false;
+	nix::evalSettings.pureEval = true;
 
-	try
-	{
-		initNix();
-		initGC();
-
-		state = nix_get_state();
-	}
-	catch (std::exception & e)
-	{
-	}
+	const nix::Strings searchPath;
+	priv->state = nix::ref<nix::EvalState>(std::make_shared<nix::EvalState>(searchPath, nix::openStore()));
 }
 
 void
 pk_backend_destroy (PkBackend* backend)
 {
-	drvs.empty ();
-	g_free (state);
 	g_free (priv);
 }
 
@@ -86,7 +82,6 @@ pk_backend_get_author (PkBackend* backend)
 	return "Matthew Bauer <mjbauer95@gmail.com>";
 }
 
-// TODO
 PkBitfield
 pk_backend_get_groups (PkBackend* backend)
 {
@@ -97,41 +92,12 @@ PkBitfield
 pk_backend_get_filters (PkBackend* backend)
 {
 	return pk_bitfield_from_enums (
-		PK_FILTER_ENUM_VISIBLE,
-		PK_FILTER_ENUM_NOT_VISIBLE,
 		PK_FILTER_ENUM_ARCH,
 		PK_FILTER_ENUM_NOT_ARCH,
 		PK_FILTER_ENUM_SUPPORTED,
 		PK_FILTER_ENUM_NOT_SUPPORTED,
 		PK_FILTER_ENUM_INSTALLED,
 		PK_FILTER_ENUM_NOT_INSTALLED,
-
-		/* TODO:
-
-		 - breaks with unfree packages
-		   PK_FILTER_ENUM_DOWNLOADED,
-		   PK_FILTER_ENUM_NOT_DOWNLOADED,
-		   PK_FILTER_ENUM_FREE,
-		   PK_FILTER_ENUM_NOT_FREE,
-
-		 - others
-		   PK_FILTER_ENUM_NONE,
-		   PK_FILTER_ENUM_DEVELOPMENT,
-		   PK_FILTER_ENUM_NOT_DEVELOPMENT,
-		   PK_FILTER_ENUM_GUI,
-		   PK_FILTER_ENUM_NOT_GUI,
-		   PK_FILTER_ENUM_BASENAME,
-		   PK_FILTER_ENUM_NOT_BASENAME,
-		   PK_FILTER_ENUM_NEWEST,
-		   PK_FILTER_ENUM_NOT_NEWEST,
-		   PK_FILTER_ENUM_SOURCE,
-		   PK_FILTER_ENUM_NOT_SOURCE,
-		   PK_FILTER_ENUM_COLLECTIONS,
-		   PK_FILTER_ENUM_NOT_COLLECTIONS,
-		   PK_FILTER_ENUM_APPLICATION,
-		   PK_FILTER_ENUM_NOT_APPLICATION,
-		*/
-
 		-1
 	);
 }
@@ -151,38 +117,6 @@ pk_backend_get_roles (PkBackend* backend)
 		PK_ROLE_ENUM_RESOLVE,
 		PK_ROLE_ENUM_SEARCH_DETAILS,
 		PK_ROLE_ENUM_SEARCH_NAME,
-
-		/* TODO
-		 - need to use binary cache db
-		   PK_ROLE_ENUM_SEARCH_FILE,
-		   PK_ROLE_ENUM_GET_FILES_LOCAL,
-		   PK_ROLE_ENUM_GET_FILES,
-
-		 - need to get data from repos through nix-channel
-		   PK_ROLE_ENUM_REPO_ENABLE,
-		   PK_ROLE_ENUM_GET_REPO_LIST,
-		   PK_ROLE_ENUM_REPO_REMOVE,
-		   PK_ROLE_ENUM_REPO_SET_DATA,
-
-		 - need to integrate with nixos
-		   PK_ROLE_ENUM_REPAIR_SYSTEM,
-		   PK_ROLE_ENUM_UPGRADE_SYSTEM,
-		   PK_ROLE_ENUM_GET_DISTRO_UPGRADES,
-
-		 - etc.
-		   PK_ROLE_ENUM_DEPENDS_ON,
-		   PK_ROLE_ENUM_REQUIRED_BY,
-		   PK_ROLE_ENUM_INSTALL_FILES,
-		   PK_ROLE_ENUM_INSTALL_SIGNATURE,
-		   PK_ROLE_ENUM_SEARCH_GROUP,
-		   PK_ROLE_ENUM_WHAT_PROVIDES,
-		   PK_ROLE_ENUM_ACCEPT_EULA,
-		   PK_ROLE_ENUM_GET_CATEGORIES,
-		   PK_ROLE_ENUM_GET_OLD_TRANSACTIONS,
-		   PK_ROLE_ENUM_WHAT_PROVIDES,
-		   PK_ROLE_ENUM_GET_UPDATE_DETAIL,
-		   PK_ROLE_ENUM_GET_DETAILS_LOCAL,
-		*/
 		-1
 	);
 }
@@ -194,651 +128,539 @@ pk_backend_get_mime_types (PkBackend* backend)
 	return g_strdupv ((gchar **) mime_types);
 }
 
+static std::shared_ptr<nix::eval_cache::AttrCursor>
+nix_get_cursor (nix::EvalState & state, std::string flake, std::string attrPath)
+{
+	nix::flake::LockFlags lockFlags;
+	auto lockedFlake = std::make_shared<nix::flake::LockedFlake> (nix::flake::lockFlake (state, nix::parseFlakeRef(flake), lockFlags));
+
+	auto evalCache = nix::ref (std::make_shared<nix::eval_cache::EvalCache> (true, lockedFlake->getFingerprint(), state,
+								[&state, lockedFlake]()
+		{
+			auto vFlake = state.allocValue ();
+			nix::flake::callFlake (state, *lockedFlake, *vFlake);
+
+			state.forceValue (*vFlake);
+
+			auto aOutputs = vFlake->attrs->get (state.symbols.create("outputs"));
+			assert (aOutputs);
+
+			return aOutputs->value;
+		}));
+
+	return evalCache->getRoot()->findAlongAttrPath (nix::parseAttrPath (state, attrPath));
+}
+
 static void
 pk_backend_get_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
+	gchar** package_ids;
+	g_variant_get (params, "(^a&s)", &package_ids);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
+	gchar** parts;
+	for (size_t i = 0; package_ids[i]; i++) {
+		// we put the attr path in "PK_PACKAGE_ID_NAME" because that’s how we identify it
+		parts = pk_package_id_split (package_ids[i]);
+		std::string attrPath = std::string (parts[PK_PACKAGE_ID_NAME]);
+		g_strfreev (parts);
 
-		DrvInfos _drvs = nix_get_drvs_from_ids (*state, drvs, (gchar**) p);
+		auto cursor = nix_get_cursor (*priv->state, "nixpkgs", attrPath);
 
-		for (auto drv : _drvs)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+		if (pk_backend_job_is_cancelled (job))
+			return;
 
-			string license = "unknown";
-			auto licenseMeta = drv.queryMeta ("license");
-			if (licenseMeta != NULL && licenseMeta->type == tAttrs)
-			{
-				auto symbol = state->symbols.create ("fullName");
-				Bindings::iterator fullName = licenseMeta->attrs->find (symbol);
-				if (fullName != licenseMeta->attrs->end () && fullName->value->type == tString)
-					license = fullName->value->string.s;
+		if (cursor->isDerivation ()) {
+			auto aMeta = cursor->maybeGetAttr ("meta");
+
+			auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+			std::string description = aDescription ? aDescription->getString () : "";
+			std::replace (description.begin (), description.end (), '\n', ' ');
+
+			std::string license = "unknown";
+			auto licenseMeta = aMeta ? aMeta->maybeGetAttr ("license") : nullptr;
+			if (licenseMeta) {
+				auto fullName = licenseMeta->maybeGetAttr ("fullName");
+				if (fullName)
+					license = fullName->getString ();
 			}
 
-			string longDescription = drv.queryMetaString ("longDescription");
-			if (longDescription == "")
-				longDescription = drv.queryMetaString ("description");
+			auto aLongDescription = aMeta ? aMeta->maybeGetAttr ("longDescription") : nullptr;
+			std::string longDescription = aLongDescription ? aLongDescription->getString () : "";
 
-			pk_backend_job_details (
-				job,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str (),
-				license.c_str(),
-				PK_GROUP_ENUM_UNKNOWN, // TODO: hack in group support
-				longDescription.c_str (),
-				drv.queryMetaString ("homepage").c_str (),
-				0
-			);
+			auto aHomepage = aMeta ? aMeta->maybeGetAttr ("homepage") : nullptr;
+			std::string homepage = aHomepage ? aHomepage->getString () : "";
+
+			pk_backend_job_details (job,
+						package_ids[i],
+						description.c_str (),
+						license.c_str (),
+						PK_GROUP_ENUM_UNKNOWN,
+						longDescription.c_str (),
+						homepage.c_str (),
+						0);
+
+			pk_backend_job_set_percentage (job, 100);
+		} else {
+			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			return;
 		}
 	}
-	catch (std::exception & e)
-	{
-	}
 
-	pk_nix_finish (job, error);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_get_details (PkBackend* backend, PkBackendJob* job, gchar** packages)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_INFO, pk_backend_get_details_thread, packages);
+	pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create(job, pk_backend_get_details_thread, NULL, NULL);
+}
+
+static nix::Path
+nix_get_user_profile (PkBackendJob* job)
+{
+	guint uid = pk_backend_job_get_uid (job);
+
+	struct passwd* uid_ent = NULL;
+	if ((uid_ent = getpwuid (uid)) == NULL)
+		g_error ("Failed to get HOME");
+
+	return std::string(uid_ent->pw_dir) + "/.nix-profile";
 }
 
 static void
-pk_backend_get_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_search_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
-
+	const gchar **search;
 	PkBitfield filters;
-	g_variant_get (params, "(t)", &filters);
+	g_variant_get (params, "(t^a&s)", &filters, &search);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
+	PkRoleEnum role = pk_backend_job_get_role(job);
+	assert (role == PK_ROLE_ENUM_SEARCH_NAME || role == PK_ROLE_ENUM_SEARCH_DETAILS);
 
-		auto profile = nix_get_profile (job);
-		DrvInfos installedDrvs = queryInstalled (*state, profile);
+	std::string flake = "nixpkgs";
+	std::string attrPath = "legacyPackages." + nix::settings.thisSystem.get () + ".";
+	auto cursor = nix_get_cursor (*priv->state, flake, attrPath);
 
-		int n = 0;
-		double percentFactor = 100 / drvs.size ();
+	if (pk_backend_job_is_cancelled (job))
+		return;
 
-		for (auto drv : drvs)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+	std::vector<std::regex> regexes;
+        for (size_t i = 0; search[i]; i++)
+            regexes.push_back (std::regex (search[i], std::regex::extended | std::regex::icase));
 
-			pk_backend_job_set_percentage (job, (n++) * percentFactor);
+	nix::DrvInfos installedDrvs;
 
-			if (!nix_filter_drv (*state, drv, settings, filters))
-				continue;
+	if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED)
+		|| pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED)) {
+		std::string userProfile = nix_get_user_profile (job);
+		if (nix::pathExists (userProfile + "/manifest.nix")) {
+			nix::Value v;
+			priv->state->evalFile (userProfile + "/manifest.nix", v);
+			nix::Bindings & bindings (*priv->state->allocBindings(0));
+			nix::getDerivations (*priv->state, v, "", bindings, installedDrvs, false);
+		}
 
-			auto info = PK_INFO_ENUM_AVAILABLE;
-
-			for (auto _drv : installedDrvs)
-				if (_drv.queryName() == drv.queryName())
-				{
-					info = PK_INFO_ENUM_INSTALLED;
-					break;
-				}
-
-			if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && info != PK_INFO_ENUM_INSTALLED)
-				continue;
-
-			if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED) && info == PK_INFO_ENUM_INSTALLED)
-				continue;
-
-			pk_backend_job_package (
-				job,
-				info,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
+		std::string defaultProfile = nix::settings.nixStateDir + "/profiles/default";
+		if (nix::pathExists (defaultProfile + "/manifest.nix")) {
+			nix::Value v;
+			priv->state->evalFile (defaultProfile + "/manifest.nix", v);
+			nix::Bindings & bindings (*priv->state->allocBindings(0));
+			nix::getDerivations (*priv->state, v, "", bindings, installedDrvs, false);
 		}
 	}
-	catch (std::exception & e)
-	{
-	}
 
-	pk_nix_finish (job, error);
+	std::function<void(nix::eval_cache::AttrCursor & cursor, const std::vector<nix::Symbol> & attrPath)> visit;
+	visit = [&](nix::eval_cache::AttrCursor & cursor, const std::vector<nix::Symbol> & attrPath) {
+		try {
+		     if (pk_backend_job_is_cancelled (job))
+			     return;
+
+			auto recurse = [&] () {
+				for (const auto & attr : cursor.getAttrs ()) {
+					auto cursor2 = cursor.getAttr (attr);
+					auto attrPath2 (attrPath);
+					attrPath2.push_back (attr);
+					visit (*cursor2, attrPath2);
+				}
+			};
+
+			if (cursor.isDerivation ()) {
+				size_t found = 0;
+
+				nix::DrvName name (cursor.getAttr ("name")->getString());
+
+				auto aMeta = cursor.maybeGetAttr ("meta");
+				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+
+				auto description = aDescription ? aDescription->getString() : "";
+				std::replace (description.begin (), description.end (), '\n', ' ');
+				auto attrPath2 = concatStringsSep (".", attrPath);
+
+				for (auto & regex : regexes) {
+					switch (role) {
+					case PK_ROLE_ENUM_SEARCH_NAME: {
+						std::smatch nameMatch;
+						std::regex_search (name.name, nameMatch, regex);
+						if (!nameMatch.empty ())
+							found++;
+						break;
+					}
+					case PK_ROLE_ENUM_SEARCH_DETAILS: {
+						std::smatch descriptionMatch;
+						std::regex_search (description, descriptionMatch, regex);
+						if (!descriptionMatch.empty ())
+							found++;
+						break;
+					}
+					default:
+						break;
+					}
+				}
+
+				if (found == regexes.size () || regexes.empty ()) {
+					bool isInstalled = false;
+					for (auto drv : installedDrvs) {
+						if (nix::DrvName (drv.queryName ()).matches(name)) {
+							isInstalled = true;
+							break;
+						}
+					}
+
+					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED) && isInstalled)
+						return;
+					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && !isInstalled)
+						return;
+
+					/* std::optional<std::vector<std::string>> platforms = aMeta ? aMeta->maybeGetAttr ("platforms") : nullptr; */
+					/* bool isArch = platforms && std::find (platforms->begin (), platforms->end (), nix::settings.thisSystem.get ()) != platforms->end(); */
+
+					/* if (pk_bitfield_contain (filters, PK_FILTER_ENUM_ARCH) && !isArch) */
+					/* 	return; */
+					/* if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_ARCH) && isArch) */
+					/* 	return; */
+
+					auto available = aMeta ? aMeta->maybeGetAttr ("available") : nullptr;
+					bool isSupported = available ? available->getBool () : true;
+
+					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_SUPPORTED) && !isSupported)
+						return;
+					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_SUPPORTED) && isSupported)
+						return;
+
+					std::string system = cursor.getAttr ("system")->getString();
+
+					PkInfoEnum info = PK_INFO_ENUM_UNKNOWN;
+					if (isSupported)
+						info = PK_INFO_ENUM_AVAILABLE;
+					if (isInstalled)
+						info = PK_INFO_ENUM_INSTALLED;
+
+					pk_backend_job_package (job,
+								info,
+								pk_package_id_build (attrPath2.c_str (),
+										     name.version.c_str (),
+										     system.c_str (),
+										     flake.c_str ()),
+								description.c_str());
+				}
+			}
+
+			else if (attrPath.size() == 0
+				|| (attrPath[0] == "legacyPackages" && attrPath.size() <= 2))
+				recurse();
+
+			else if (attrPath[0] == "legacyPackages" && attrPath.size() > 2) {
+				auto attr = cursor.maybeGetAttr(priv->state->sRecurseForDerivations);
+				if (attr && attr->getBool())
+					recurse();
+			}
+		} catch (nix::EvalError & e) {
+		}
+        };
+	visit(*cursor, parseAttrPath(*priv->state, attrPath));
+
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_get_packages (PkBackend* backend, PkBackendJob* job, PkBitfield filters)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_GENERATE_PACKAGE_LIST, pk_backend_get_packages_thread, NULL);
-}
-
-static void
-pk_backend_resolve_thread (PkBackendJob* job, GVariant* params, gpointer p)
-{
-	g_autoptr (GError) error = NULL;
-
-	const gchar **search;
-	PkBitfield filters;
-	g_variant_get (params, "(t^a&s)", &filters, &search);
-
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
-
-		auto profile = nix_get_profile (job);
-		DrvInfos installedDrvs = queryInstalled (*state, profile);
-
-		for (; *search != NULL; ++search)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
-
-			DrvName searchName (*search);
-
-			for (auto drv : drvs)
-			{
-				DrvName drvName (drv.queryName());
-				if (searchName.matches (drvName))
-				{
-					if (!nix_filter_drv (*state, drv, settings, filters))
-						continue;
-
-					auto info = PK_INFO_ENUM_AVAILABLE;
-
-					for (auto _drv : installedDrvs)
-						if (_drv.queryName() == drv.queryName())
-						{
-							info = PK_INFO_ENUM_INSTALLED;
-							break;
-						}
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && info != PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED) && info == PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					pk_backend_job_package (
-						job,
-						info,
-						nix_drv_package_id (drv),
-						drv.queryMetaString ("description").c_str ()
-					);
-				}
-			}
-		}
-	}
-	catch (std::exception & e)
-	{
-	}
-
-	pk_nix_finish (job, error);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_GENERATE_PACKAGE_LIST);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create(job, nix_search_thread, NULL, NULL);
 }
 
 void
-pk_backend_resolve (PkBackend* self, PkBackendJob* job, PkBitfield filters, gchar** search)
-{
-	pk_nix_run (job, PK_STATUS_ENUM_QUERY, pk_backend_resolve_thread, NULL);
-}
-
-static void
-pk_backend_search_names_thread (PkBackendJob* job, GVariant* params, gpointer p)
-{
-	g_autoptr (GError) error = NULL;
-
-	gchar **search;
-	PkBitfield filters;
-	g_variant_get (params, "(t^a&s)", &filters, &search);
-
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
-
-		auto profile = nix_get_profile (job);
-		DrvInfos installedDrvs = queryInstalled (*state, profile);
-
-		for (; *search != NULL; ++search)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
-
-			for (auto drv : drvs)
-				if (drv.queryName().find(*search) != -1)
-				{
-					if (!nix_filter_drv (*state, drv, settings, filters))
-						continue;
-
-					auto info = PK_INFO_ENUM_AVAILABLE;
-
-					for (auto _drv : installedDrvs)
-						if (_drv.queryName() == drv.queryName())
-						{
-							info = PK_INFO_ENUM_INSTALLED;
-							break;
-						}
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && info != PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED) && info == PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					pk_backend_job_package (
-						job,
-						info,
-						nix_drv_package_id (drv),
-						drv.queryMetaString ("description").c_str ()
-					);
-				}
-		}
-	}
-	catch (std::exception & e)
-	{
-	}
-
-	pk_nix_finish (job, error);
-}
-
-void
-pk_backend_search_names (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **values)
-{
-	pk_nix_run (job, PK_STATUS_ENUM_QUERY, pk_backend_search_names_thread, NULL);
-}
-
-static void
-pk_backend_search_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
-{
-	g_autoptr (GError) error = NULL;
-
-	gchar **value;
-	PkBitfield filters;
-	g_variant_get (params, "(t^a&s)", &filters, &value);
-
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
-
-		auto profile = nix_get_profile (job);
-		DrvInfos installedDrvs = queryInstalled (*state, profile);
-
-		for (; *value != NULL; ++value)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
-
-			for (auto drv : drvs)
-				if (drv.queryMetaString ("description").find (*value) != -1)
-				{
-					if (!nix_filter_drv (*state, drv, settings, filters))
-						continue;
-
-					auto info = PK_INFO_ENUM_AVAILABLE;
-
-					for (auto _drv : installedDrvs)
-						if (_drv.queryName() == drv.queryName())
-						{
-							info = PK_INFO_ENUM_INSTALLED;
-							break;
-						}
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && info != PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_NOT_INSTALLED) && info == PK_INFO_ENUM_INSTALLED)
-						continue;
-
-					pk_backend_job_package (
-						job,
-						info,
-						nix_drv_package_id (drv),
-						drv.queryMetaString ("description").c_str ()
-					);
-				}
-		}
-	}
-	catch (std::exception & e)
-	{
-	}
-
-	pk_nix_finish (job, error);
+pk_backend_search_names (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **values) {
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
 }
 
 void
 pk_backend_search_details (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **values)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_QUERY, pk_backend_search_details_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
+}
+
+void
+pk_backend_resolve(PkBackend* self, PkBackendJob* job, PkBitfield filters, gchar** search)
+{
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
 }
 
 static void
-pk_backend_refresh_cache_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_refresh_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
+	nix::settings.tarballTtl = 0;
+	nix_search_thread (job, params, p);
+	nix::settings.tarballTtl = 60 * 60;
 
-	try
-	{
-		state = nix_get_state ();
-		drvs = nix_get_all_derivations (*state, priv->roothome);
-	}
-	catch (std::exception & e)
-	{
-	}
-
-	pk_nix_finish (job, error);
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_refresh_cache (PkBackend* backend, PkBackendJob* job, gboolean force)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_REFRESH_CACHE, pk_backend_refresh_cache_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_REFRESH_CACHE);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_refresh_thread, NULL, NULL);
 }
 
 static void
-pk_backend_install_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_install_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
-
 	PkBitfield flags;
 	gchar** package_ids;
-
 	g_variant_get (params, "(t^a&s)", &flags, &package_ids);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
+	nix::DrvInfos newElems;
+	gchar** parts;
 
-		DrvInfos newElems = nix_get_drvs_from_ids (*state, drvs, package_ids);
+	for (size_t i = 0; package_ids[i]; i++) {
+		if (pk_backend_job_is_cancelled (job))
+			return;
 
-		for (auto drv : newElems)
-		{
-			pk_backend_job_package (
-				job,
-				PK_INFO_ENUM_INSTALLING,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
+		// we put the attr path in "PK_PACKAGE_ID_NAME" because that’s how we identify it
+		parts = pk_package_id_split (package_ids[i]);
+		std::string attrPath = std::string (parts[PK_PACKAGE_ID_NAME]);
+		g_strfreev (parts);
+
+		auto cursor = nix_get_cursor (*priv->state, "nixpkgs", attrPath);
+		if (cursor->isDerivation ()) {
+			auto drv = nix::getDerivation(*priv->state, cursor->forceValue(), false);
+			if (drv) {
+				auto aMeta = cursor->maybeGetAttr ("meta");
+				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+				auto description = aDescription ? aDescription->getString() : "";
+
+				pk_backend_job_package (job, PK_INFO_ENUM_INSTALLING, package_ids[i], description.c_str());
+				newElems.push_back (*drv);
+			} else {
+				pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "failed to evaluate %s", attrPath.c_str ());
+				return;
+			}
+		} else {
+			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			return;
 		}
+	}
 
-		Path profile = nix_get_profile (job);
+	std::string profile = nix_get_user_profile (job);
 
-		while (true)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+	while (true) {
+		if (pk_backend_job_is_cancelled (job))
+			return;
 
-			string lockToken = optimisticLockProfile (profile);
-			DrvInfos allElems (newElems);
+		std::string lockToken = nix::optimisticLockProfile (profile);
 
-			DrvInfos installedElems = queryInstalled (*state, profile);
+		nix::DrvInfos allElems (newElems);
 
-			for (auto & i : installedElems)
-			{
-				DrvName drvName(i.queryName());
-				allElems.push_back (i);
+		/* Add in the already installed derivations, unless they have
+		   the same name as a to-be-installed element. */
+		nix::DrvInfos installedElems = nix::queryInstalled (*priv->state, profile);
+
+		for (auto & i : installedElems) {
+			bool found = false;
+
+			for (auto & j : newElems) {
+				if (j.queryDrvPath() == i.queryDrvPath()) {
+					found = true;
+					break;
+				}
 			}
 
-			if (createUserEnv (*state, allElems, profile, false, lockToken))
-				break;
+			if (!found)
+				allElems.push_back (i);
 		}
 
-		for (auto drv : newElems)
-		{
-			pk_backend_job_package (
-				job,
-				PK_INFO_ENUM_INSTALLED,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
-		}
-	}
-	catch (std::exception & e)
-	{
+		if (nix::createUserEnv (*priv->state, allElems, profile, false, lockToken))
+			break;
 	}
 
-	pk_nix_finish (job, error);
+	for (size_t i = 0; package_ids[i]; i++)
+		pk_backend_job_package (job, PK_INFO_ENUM_INSTALLED, package_ids[i], NULL);
+
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_install_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_INSTALL, pk_backend_install_packages_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_INSTALL);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_install_thread, NULL, NULL);
 }
 
 static void
-pk_backend_remove_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_remove_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
-
 	PkBitfield transaction_flags;
 	gchar** package_ids;
 	gboolean allow_deps, autoremove;
 	g_variant_get (params, "(t^a&sbb)", &transaction_flags, &package_ids, &allow_deps, &autoremove);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations(*state, priv->roothome);
+	nix::Path profile = nix_get_user_profile (job);
 
-		DrvInfos _drvs = nix_get_drvs_from_ids (*state, drvs, package_ids);
+	nix::DrvInfos elemsToDelete;
+	gchar** parts;
 
-		for (auto drv : _drvs)
-		{
-			pk_backend_job_package (
-				job,
-				PK_INFO_ENUM_REMOVING,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
+	for (size_t i = 0; package_ids[i]; i++) {
+		// we put the attr path in "PK_PACKAGE_ID_NAME" because that’s how we identify it
+		parts = pk_package_id_split (package_ids[i]);
+		std::string attrPath = std::string (parts[PK_PACKAGE_ID_NAME]);
+		g_strfreev (parts);
+
+		auto cursor = nix_get_cursor (*priv->state, "nixpkgs", attrPath);
+		if (cursor->isDerivation ()) {
+			auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
+			if (drv)
+				elemsToDelete.push_back (*drv);
+			else {
+				pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "failed to evaluate %s", attrPath.c_str ());
+				return;
+			}
+		} else {
+			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			return;
 		}
 
-		Path profile = nix_get_profile (job);
+		auto aMeta = cursor->maybeGetAttr ("meta");
+		auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+		auto description = aDescription ? aDescription->getString() : "";
 
-		while (true)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+		pk_backend_job_package (job, PK_INFO_ENUM_REMOVING, package_ids[i], description.c_str());
+	}
 
-			string lockToken = optimisticLockProfile (profile);
+	while (true) {
+		if (pk_backend_job_is_cancelled (job))
+			break;
 
-			DrvInfos installedElems = queryInstalled (*state, profile);
-			DrvInfos newElems;
+		std::string lockToken = nix::optimisticLockProfile (profile);
 
-			for (auto & drv : installedElems)
-			{
-				bool found = false;
+		nix::DrvInfos installedElems = nix::queryInstalled (*priv->state, profile);
+		nix::DrvInfos newElems;
 
-				for (auto & _drv : _drvs)
-					if (drv.attrPath == _drv.attrPath)
-					{
-						found = true;
-						break;
-					}
+		for (auto & i : installedElems) {
+			bool found = false;
 
-				if (!found)
-					newElems.push_back (drv);
+
+			for (auto & j : elemsToDelete) {
+				if (j.queryDrvPath() == i.queryDrvPath()) {
+					found = true;
+					break;
+				}
 			}
 
-			if (createUserEnv (*state, newElems, profile, false, lockToken))
-				break;
+			if (!found)
+				newElems.push_back (i);
 		}
 
-		for (auto drv : _drvs)
-		{
-			pk_backend_job_package (
-				job,
-				PK_INFO_ENUM_AVAILABLE,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
-		}
-	}
-	catch (std::exception & e)
-	{
+		if (nix::createUserEnv (*priv->state, newElems, profile, false, lockToken))
+			break;
 	}
 
-	pk_nix_finish (job, error);
+	for (size_t i = 0; package_ids[i]; i++)
+		pk_backend_job_package (job, PK_INFO_ENUM_AVAILABLE, package_ids[i], NULL);
+
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_remove_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids, gboolean allow_deps, gboolean autoremove)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_REMOVE, pk_backend_remove_packages_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_REMOVE);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_remove_thread, NULL, NULL);
 }
 
 static void
-pk_backend_update_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_update_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
-	g_autoptr (GError) error = NULL;
+	auto profile = nix_get_user_profile (job);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
+	while (true) {
+		if (pk_backend_job_is_cancelled (job))
+			break;
 
-		auto profile = nix_get_profile (job);
+		std::string lockToken = nix::optimisticLockProfile (profile);
 
-		while (true)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+		nix::DrvInfos installedElems = nix::queryInstalled (*priv->state, profile);
+		nix::DrvInfos newElems;
 
-			string lockToken = optimisticLockProfile (profile);
-
-			DrvInfos installedElems = queryInstalled (*state, profile);
-
-			/* Go through all installed derivations. */
-			DrvInfos newElems;
-			for (auto & i : installedElems)
-			{
-				DrvName drvName (i.queryName());
-
-				try
-				{
-					if (keep (i))
-					{
-						newElems.push_back (i);
-						continue;
+		for (auto & i : installedElems) {
+			auto cursor = nix_get_cursor (*priv->state, "nixpkgs", i.attrPath);
+			if (cursor->isDerivation ()) {
+				auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
+				if (drv) {
+					newElems.push_back (*drv);
+					if (drv->queryDrvPath () != i.queryDrvPath ()) {
+						nix::DrvName name (drv->queryName ());
+						pk_backend_job_package (job,
+									PK_INFO_ENUM_UPDATING,
+									pk_package_id_build(drv->attrPath.c_str (), name.version.c_str (), drv->querySystem ().c_str (), NULL),
+									drv->queryMetaString ("description").c_str ());
 					}
+				} else newElems.push_back(i);
+			} else newElems.push_back(i);
+		}
 
-					/* Find the derivation in the input Nix expression
-					   with the same name that satisfies the version
-					   constraints specified by upgradeType.  If there are
-					   multiple matches, take the one with the highest
-					   priority.  If there are still multiple matches,
-					   take the one with the highest version.
-					   Do not upgrade if it would decrease the priority. */
-					DrvInfos::iterator bestElem = drvs.end ();
-					string bestVersion;
+		if (nix::createUserEnv (*priv->state, newElems, profile, false, lockToken))
+			break;
 
-					for (auto j = drvs.begin (); j != drvs.end (); ++j)
-					{
-						if (comparePriorities (*state, i, *j) > 0)
-							continue;
-
-						DrvName newName (j->queryName());
-						if (newName.name == drvName.name)
-						{
-							int d = compareVersions (drvName.version, newName.version);
-							if (d < 0)
-							{
-								int d2 = -1;
-								if (bestElem != drvs.end ())
-								{
-									d2 = comparePriorities (*state, *bestElem, *j);
-									if (d2 == 0)
-										d2 = compareVersions (bestVersion, newName.version);
-								}
-								if (d2 < 0)
-								{
-									bestElem = j;
-									bestVersion = newName.version;
-								}
-							}
-						}
-					}
-
-					if (bestElem != drvs.end () && i.queryOutPath () != bestElem->queryOutPath ())
-					{
-						const char * action;
-						auto _drv = *bestElem;
-						if (compareVersions (drvName.version, bestVersion) <= 0)
-						{
-							pk_backend_job_package (
-								job,
-								PK_INFO_ENUM_UPDATING,
-								nix_drv_package_id (_drv),
-								_drv.queryMetaString ("description").c_str ()
-							);
-
-							action = "upgrading";
-						}
-						else
-						{
-							pk_backend_job_package (
-								job,
-								PK_INFO_ENUM_DOWNGRADING,
-								nix_drv_package_id (_drv),
-								_drv.queryMetaString ("description").c_str ()
-							);
-
-							action = "downgrading";
-						}
-						newElems.push_back (*bestElem);
-					}
-					else
-						newElems.push_back (i);
-				}
-				catch (Error & e)
-				{
-					throw;
-				}
-			}
-
-			if (createUserEnv (*state, newElems, profile, false, lockToken))
-			{
-				for (auto drv : newElems)
-				{
-					pk_backend_job_package (
-						job,
+		for (auto & drv : newElems) {
+			nix::DrvName name (drv.queryName ());
+			pk_backend_job_package (job,
 						PK_INFO_ENUM_INSTALLED,
-						nix_drv_package_id (drv),
-						drv.queryMetaString ("description").c_str ()
-					);
-				}
-
-				break;
-			}
+						pk_package_id_build(drv.attrPath.c_str (), name.version.c_str (), drv.querySystem ().c_str (), NULL),
+						drv.queryMetaString ("description").c_str ());
 		}
 	}
-	catch (std::exception & e)
-	{
-	}
 
-	pk_nix_finish (job, error);
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_update_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_UPDATE, pk_backend_update_packages_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_UPDATE);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_update_thread, NULL, NULL);
 }
 
 static void
-pk_backend_download_packages_thread (PkBackendJob* job, GVariant* params, gpointer p)
+nix_download_thread (PkBackendJob* job, GVariant* params, gpointer p)
 {
 	g_autoptr (GError) error = NULL;
 
@@ -846,43 +668,43 @@ pk_backend_download_packages_thread (PkBackendJob* job, GVariant* params, gpoint
 	gchar** package_ids;
 	g_variant_get (params, "(^a&ss)", &package_ids, &directory);
 
-	try
-	{
-		// possibly slow call
-		if (drvs.empty ())
-			drvs = nix_get_all_derivations (*state, priv->roothome);
+	gchar** parts;
 
-		DrvInfos _drvs = nix_get_drvs_from_ids (*state, drvs, package_ids);
+	for (size_t i = 0; package_ids[i]; i++) {
+		// we put the attr path in "PK_PACKAGE_ID_NAME" because that’s how we identify it
+		parts = pk_package_id_split (package_ids[i]);
+		std::string attrPath = std::string (parts[PK_PACKAGE_ID_NAME]);
+		g_strfreev (parts);
 
-		PathSet paths;
-		for (auto drv : _drvs)
-		{
-			if (pk_backend_job_is_cancelled (job))
-				break;
+		auto cursor = nix_get_cursor (*priv->state, "nixpkgs", attrPath);
+		if (cursor->isDerivation ()) {
+			auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
+			if (drv) {
+				auto aMeta = cursor->maybeGetAttr ("meta");
+				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+				auto description = aDescription ? aDescription->getString() : "";
 
-			pk_backend_job_package (
-				job,
-				PK_INFO_ENUM_DOWNLOADING,
-				nix_drv_package_id (drv),
-				drv.queryMetaString ("description").c_str ()
-			);
+				pk_backend_job_package (job, PK_INFO_ENUM_DOWNLOADING, package_ids[i], description.c_str());
 
-			// should provide updates to status
-			// just build one path at a time
-			PathSet paths;
-			paths.insert (drv.queryOutPath ());
-			state->store->buildPaths (paths);
+				priv->state->store->ensurePath (priv->state->store->parseStorePath (drv->queryOutPath ()));
+			} else {
+				pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "failed to evaluate %s", attrPath.c_str ());
+				return;
+			}
+		} else {
+			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			return;
 		}
 	}
-	catch (std::exception & e)
-	{
-	}
 
-	pk_nix_finish (job, error);
+	pk_backend_job_set_percentage (job, 100);
+	pk_backend_job_finished (job);
 }
 
 void
 pk_backend_download_packages (PkBackend* backend, PkBackendJob* job, gchar** package_ids, const gchar* directory)
 {
-	pk_nix_run (job, PK_STATUS_ENUM_DOWNLOAD, pk_backend_download_packages_thread, NULL);
+	pk_backend_job_set_status (job, PK_STATUS_ENUM_DOWNLOAD);
+	pk_backend_job_set_percentage (job, 0);
+	pk_backend_job_thread_create (job, nix_download_thread, NULL, NULL);
 }
