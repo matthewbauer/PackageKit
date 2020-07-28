@@ -118,6 +118,8 @@ pk_backend_get_roles (PkBackend* backend)
 		PK_ROLE_ENUM_RESOLVE,
 		PK_ROLE_ENUM_SEARCH_DETAILS,
 		PK_ROLE_ENUM_SEARCH_NAME,
+		PK_ROLE_ENUM_UPDATE_PACKAGES,
+		PK_ROLE_ENUM_GET_UPDATES,
 		-1
 	);
 }
@@ -171,25 +173,25 @@ pk_backend_get_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
 		if (pk_backend_job_is_cancelled (job))
 			return;
 
-		if (cursor->isDerivation ()) {
+		if (cursor && cursor->isDerivation ()) {
 			auto aMeta = cursor->maybeGetAttr ("meta");
 
-			auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+			auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : NULL;
 			std::string description = aDescription ? aDescription->getString () : "";
 			std::replace (description.begin (), description.end (), '\n', ' ');
 
 			std::string license = "unknown";
-			auto licenseMeta = aMeta ? aMeta->maybeGetAttr ("license") : nullptr;
+			auto licenseMeta = aMeta ? aMeta->maybeGetAttr ("license") : NULL;
 			if (licenseMeta) {
 				auto fullName = licenseMeta->maybeGetAttr ("fullName");
 				if (fullName)
 					license = fullName->getString ();
 			}
 
-			auto aLongDescription = aMeta ? aMeta->maybeGetAttr ("longDescription") : nullptr;
+			auto aLongDescription = aMeta ? aMeta->maybeGetAttr ("longDescription") : NULL;
 			std::string longDescription = aLongDescription ? aLongDescription->getString () : "";
 
-			auto aHomepage = aMeta ? aMeta->maybeGetAttr ("homepage") : nullptr;
+			auto aHomepage = aMeta ? aMeta->maybeGetAttr ("homepage") : NULL;
 			std::string homepage = aHomepage ? aHomepage->getString () : "";
 
 			pk_backend_job_details (job,
@@ -201,7 +203,10 @@ pk_backend_get_details_thread (PkBackendJob* job, GVariant* params, gpointer p)
 						homepage.c_str (),
 						0);
 		} else {
-			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			pk_backend_job_error_code (job,
+						   PK_ERROR_ENUM_UNKNOWN,
+						   "%s is not a package",
+						   attrPath.c_str ());
 			return;
 		}
 	}
@@ -213,7 +218,6 @@ void
 pk_backend_get_details (PkBackend* backend, PkBackendJob* job, gchar** packages)
 {
 	pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create(job, pk_backend_get_details_thread, NULL, NULL);
 }
 
@@ -320,10 +324,12 @@ nix_search_thread (PkBackendJob* job, GVariant* params, gpointer p)
 				nix::DrvName name (cursor.getAttr ("name")->getString());
 
 				auto aMeta = cursor.maybeGetAttr ("meta");
-				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : NULL;
 
 				auto description = aDescription ? aDescription->getString() : "";
 				std::replace (description.begin (), description.end (), '\n', ' ');
+
+				auto attrPath2 = concatStringsSep (".", attrPath);
 
 				for (auto & regex : regexes) {
 					switch (role) {
@@ -331,7 +337,9 @@ nix_search_thread (PkBackendJob* job, GVariant* params, gpointer p)
 					case PK_ROLE_ENUM_RESOLVE: {
 						std::smatch nameMatch;
 						std::regex_search (name.name, nameMatch, regex);
-						if (!nameMatch.empty ())
+						std::smatch attrMatch;
+						std::regex_search (attrPath2, attrMatch, regex);
+						if (!nameMatch.empty () || !attrMatch.empty())
 							found++;
 						break;
 					}
@@ -362,7 +370,7 @@ nix_search_thread (PkBackendJob* job, GVariant* params, gpointer p)
 					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_INSTALLED) && !isInstalled)
 						return;
 
-					auto available = aMeta ? aMeta->maybeGetAttr ("available") : nullptr;
+					auto available = aMeta ? aMeta->maybeGetAttr ("available") : NULL;
 					bool isSupported = available ? available->getBool () : true;
 
 					if (pk_bitfield_contain (filters, PK_FILTER_ENUM_SUPPORTED) && !isSupported)
@@ -381,10 +389,9 @@ nix_search_thread (PkBackendJob* job, GVariant* params, gpointer p)
 					if (totalDrvs > 0)
 						pk_backend_job_set_percentage (job, 100 * foundDrvs / totalDrvs);
 
-					auto identifier = concatStringsSep (".", attrPath);
 					pk_backend_job_package (job,
 								info,
-								pk_package_id_build (identifier.c_str (),
+								pk_package_id_build (attrPath2.c_str (),
 										     name.version.c_str (),
 										     system.c_str (),
 										     priv->defaultFlake.c_str ()),
@@ -412,14 +419,12 @@ void
 pk_backend_get_packages (PkBackend* backend, PkBackendJob* job, PkBitfield filters)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_GENERATE_PACKAGE_LIST);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create(job, nix_search_thread, NULL, NULL);
 }
 
 void
 pk_backend_search_names (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **values) {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
 }
 
@@ -427,7 +432,6 @@ void
 pk_backend_search_details (PkBackend *backend, PkBackendJob *job, PkBitfield filters, gchar **values)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
 }
 
@@ -435,7 +439,6 @@ void
 pk_backend_resolve(PkBackend* self, PkBackendJob* job, PkBitfield filters, gchar** search)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_QUERY);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_search_thread, NULL, NULL);
 }
 
@@ -453,7 +456,6 @@ void
 pk_backend_refresh_cache (PkBackend* backend, PkBackendJob* job, gboolean force)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_REFRESH_CACHE);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_refresh_thread, NULL, NULL);
 }
 
@@ -478,21 +480,42 @@ nix_install_thread (PkBackendJob* job, GVariant* params, gpointer p)
 		g_strfreev (parts);
 
 		auto cursor = nix_get_cursor (*priv->state, flake, "legacyPackages." + nix::settings.thisSystem.get () + "." + attrPath);
-		if (cursor->isDerivation ()) {
-			auto drv = nix::getDerivation(*priv->state, cursor->forceValue(), false);
+
+		if (cursor && cursor->isDerivation ()) {
+			std::optional<nix::DrvInfo> drv;
+			drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
 			if (drv) {
 				auto aMeta = cursor->maybeGetAttr ("meta");
-				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+				auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : NULL;
 				auto description = aDescription ? aDescription->getString() : "";
 
-				pk_backend_job_package (job, PK_INFO_ENUM_INSTALLING, package_ids[i], description.c_str());
+				try {
+					drv->queryDrvPath ();
+				} catch (nix::Error & e) {
+					pk_backend_job_error_code (job,
+								   PK_ERROR_ENUM_UNKNOWN,
+								   "failed to evaluate %s",
+								   attrPath.c_str ());
+					return;
+				}
+
+				pk_backend_job_package (job,
+							PK_INFO_ENUM_INSTALLING,
+							package_ids[i],
+							description.c_str());
 				newElems.push_back (*drv);
 			} else {
-				pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "failed to evaluate %s", attrPath.c_str ());
+				pk_backend_job_error_code (job,
+							   PK_ERROR_ENUM_UNKNOWN,
+							   "failed to evaluate %s",
+							   attrPath.c_str ());
 				return;
 			}
 		} else {
-			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			pk_backend_job_error_code (job,
+						   PK_ERROR_ENUM_UNKNOWN,
+						   "%s is not a package",
+						   attrPath.c_str ());
 			return;
 		}
 	}
@@ -520,7 +543,7 @@ nix_install_thread (PkBackendJob* job, GVariant* params, gpointer p)
 			bool found = false;
 
 			for (auto & j : newElems) {
-				if (j.queryDrvPath() == i.queryDrvPath()) {
+				if (j.queryDrvPath () == i.queryDrvPath ()) {
 					found = true;
 					break;
 				}
@@ -530,8 +553,16 @@ nix_install_thread (PkBackendJob* job, GVariant* params, gpointer p)
 				allElems.push_back (i);
 		}
 
-		if (nix::createUserEnv (*priv->state, allElems, profile, false, lockToken))
-			break;
+		try {
+			if (nix::createUserEnv (*priv->state, allElems, profile, false, lockToken))
+				break;
+		} catch (nix::Error & e) {
+			priv->state->allowedPaths = oldAllowedPaths;
+			pk_backend_job_error_code (job,
+						   PK_ERROR_ENUM_UNKNOWN,
+						   "failed to create new environment");
+			return;
+		}
 	}
 
 	priv->state->allowedPaths = oldAllowedPaths;
@@ -546,7 +577,6 @@ void
 pk_backend_install_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_INSTALL);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_install_thread, NULL, NULL);
 }
 
@@ -571,21 +601,27 @@ nix_remove_thread (PkBackendJob* job, GVariant* params, gpointer p)
 		g_strfreev (parts);
 
 		auto cursor = nix_get_cursor (*priv->state, flake, "legacyPackages." + nix::settings.thisSystem.get () + "." + attrPath);
-		if (cursor->isDerivation ()) {
+		if (cursor && cursor->isDerivation ()) {
 			auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
 			if (drv)
 				elemsToDelete.push_back (*drv);
 			else {
-				pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "failed to evaluate %s", attrPath.c_str ());
+				pk_backend_job_error_code (job,
+							   PK_ERROR_ENUM_UNKNOWN,
+							   "failed to evaluate %s",
+							   attrPath.c_str ());
 				return;
 			}
 		} else {
-			pk_backend_job_error_code (job, PK_ERROR_ENUM_UNKNOWN, "%s is not a package", attrPath.c_str ());
+			pk_backend_job_error_code (job,
+						   PK_ERROR_ENUM_UNKNOWN,
+						   "%s is not a package",
+						   attrPath.c_str ());
 			return;
 		}
 
 		auto aMeta = cursor->maybeGetAttr ("meta");
-		auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : nullptr;
+		auto aDescription = aMeta ? aMeta->maybeGetAttr ("description") : NULL;
 		auto description = aDescription ? aDescription->getString() : "";
 
 		pk_backend_job_package (job, PK_INFO_ENUM_REMOVING, package_ids[i], description.c_str());
@@ -636,74 +672,54 @@ void
 pk_backend_remove_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids, gboolean allow_deps, gboolean autoremove)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_REMOVE);
-	pk_backend_job_set_percentage (job, 0);
 	pk_backend_job_thread_create (job, nix_remove_thread, NULL, NULL);
-}
-
-static void
-nix_update_thread (PkBackendJob* job, GVariant* params, gpointer p)
-{
-	auto profile = nix_get_user_profile (job);
-
-	std::optional<nix::PathSet> oldAllowedPaths = priv->state->allowedPaths;
-	priv->state->allowedPaths = std::nullopt;
-
-	nix::DrvInfos newElems;
-
-	while (true) {
-		if (pk_backend_job_is_cancelled (job)) {
-			priv->state->allowedPaths = oldAllowedPaths;
-			return;
-		}
-
-		std::string lockToken = nix::optimisticLockProfile (profile);
-
-		nix::DrvInfos installedElems = nix::queryInstalled (*priv->state, profile);
-
-		for (auto & i : installedElems) {
-			auto cursor = nix_get_cursor (*priv->state, priv->defaultFlake, "legacyPackages." + nix::settings.thisSystem.get () + "." + i.attrPath);
-			if (cursor->isDerivation ()) {
-				auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
-				if (drv) {
-					newElems.push_back (*drv);
-					if (drv->queryDrvPath () != i.queryDrvPath ()) {
-						nix::DrvName name (drv->queryName ());
-						pk_backend_job_package (job,
-									PK_INFO_ENUM_UPDATING,
-									pk_package_id_build (drv->attrPath.c_str (),
-											     name.version.c_str (),
-											     drv->querySystem ().c_str (),
-											     priv->defaultFlake.c_str ()),
-									drv->queryMetaString ("description").c_str ());
-					}
-				} else newElems.push_back(i);
-			} else newElems.push_back(i);
-		}
-
-		if (nix::createUserEnv (*priv->state, newElems, profile, false, lockToken))
-			break;
-	}
-
-	priv->state->allowedPaths = oldAllowedPaths;
-
-	for (auto & drv : newElems) {
-		nix::DrvName name (drv.queryName ());
-		pk_backend_job_package (job,
-					PK_INFO_ENUM_INSTALLED,
-					pk_package_id_build (drv.attrPath.c_str (),
-							     name.version.c_str (),
-							     drv.querySystem ().c_str (),
-							     priv->defaultFlake.c_str ()),
-					drv.queryMetaString ("description").c_str ());
-	}
-
-	pk_backend_job_set_percentage (job, 100);
 }
 
 void
 pk_backend_update_packages (PkBackend* backend, PkBackendJob* job, PkBitfield transaction_flags, gchar** package_ids)
 {
 	pk_backend_job_set_status (job, PK_STATUS_ENUM_UPDATE);
-	pk_backend_job_set_percentage (job, 0);
-	pk_backend_job_thread_create (job, nix_update_thread, NULL, NULL);
+	pk_backend_job_thread_create (job, nix_install_thread, NULL, NULL);
+}
+
+static void
+nix_get_updates_thread (PkBackendJob* job, GVariant* params, gpointer p)
+{
+	auto profile = nix_get_user_profile (job);
+
+	std::optional<nix::PathSet> oldAllowedPaths = priv->state->allowedPaths;
+	priv->state->allowedPaths = std::nullopt;
+
+	nix::DrvInfos installedElems = nix::queryInstalled (*priv->state, profile);
+
+	priv->state->allowedPaths = oldAllowedPaths;
+
+	int progress = 0;
+	for (auto & i : installedElems) {
+		pk_backend_job_set_percentage (job, 100 * progress++ / installedElems.size());
+
+		auto cursor = nix_get_cursor (*priv->state, priv->defaultFlake, "legacyPackages." + nix::settings.thisSystem.get () + "." + i.attrPath);
+		if (cursor && cursor->isDerivation ()) {
+			auto drv = nix::getDerivation (*priv->state, cursor->forceValue(), false);
+			if (drv && drv->queryDrvPath () != i.queryDrvPath ()) {
+				nix::DrvName name (drv->queryName ());
+				pk_backend_job_package (job,
+							PK_INFO_ENUM_NORMAL,
+							pk_package_id_build (drv->attrPath.c_str (),
+									     name.version.c_str (),
+									     drv->querySystem ().c_str (),
+									     priv->defaultFlake.c_str ()),
+							drv->queryMetaString ("description").c_str ());
+			}
+		}
+	}
+
+	pk_backend_job_set_percentage (job, 100);
+}
+
+void
+pk_backend_get_updates(PkBackend *backend, PkBackendJob *job, PkBitfield filters)
+{
+	pk_backend_job_set_status(job, PK_STATUS_ENUM_QUERY);
+	pk_backend_job_thread_create(job, nix_get_updates_thread, NULL, NULL);
 }
